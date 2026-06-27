@@ -1,0 +1,11 @@
+[package]
+name = "chunked-store"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+axum = "0.8.9"
+tower-http = { version = "0.7.0", features = ["cors"] }
+tokio = { version = "1.52.3", features = ["full"] }
+tokio-stream = { version = "0.1.18", features = ["full"] }
+futures-util = "0.3.32"
