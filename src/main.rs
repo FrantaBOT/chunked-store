@@ -6,8 +6,9 @@ use axum::{
     response::IntoResponse,
     routing::{delete, get, put},
 };
+use dashmap::DashMap;
 use futures_util::stream;
-use std::{collections::HashMap, env, sync::Arc};
+use std::{env, sync::Arc};
 use tokio::{
     net::TcpListener,
     sync::{
@@ -22,7 +23,7 @@ use tokio_stream::{
 use tower_http::cors::{Any, CorsLayer};
 
 struct AppState {
-    segments: RwLock<HashMap<String, Arc<RwLock<Segment>>>>,
+    segments: DashMap<String, Arc<RwLock<Segment>>>,
 }
 
 struct Segment {
@@ -65,11 +66,9 @@ async fn handle_put(
     println!("PUT: {}", path);
 
     let segment = {
-        let mut segments = state.segments.write().await;
-
         let segment = Arc::new(RwLock::new(Segment::new()));
 
-        segments.insert(path.clone(), Arc::clone(&segment));
+        state.segments.insert(path.clone(), Arc::clone(&segment));
 
         segment
     };
@@ -98,10 +97,8 @@ async fn handle_get(
     println!("GET: {}", path);
 
     let segment = {
-        let segments = state.segments.read().await;
-
-        match segments.get(&path) {
-            Some(segment) => Arc::clone(segment),
+        match state.segments.get(&path) {
+            Some(segment) => Arc::clone(&segment),
             None => return (StatusCode::NOT_FOUND, "not found".to_string()).into_response(),
         }
     };
@@ -140,7 +137,7 @@ async fn main() {
     let address = env::var("ADDRESS").unwrap_or("127.0.0.1:8080".into());
 
     let state = Arc::new(AppState {
-        segments: RwLock::new(HashMap::new()),
+        segments: DashMap::new(),
     });
 
     let app = Router::new()
