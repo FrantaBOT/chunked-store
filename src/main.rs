@@ -16,10 +16,7 @@ use tokio::{
         broadcast::{self, Receiver, Sender},
     },
 };
-use tokio_stream::{
-    StreamExt,
-    wrappers::{BroadcastStream, errors::BroadcastStreamRecvError},
-};
+use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 use tower_http::cors::{Any, CorsLayer};
 
 struct AppState {
@@ -109,11 +106,7 @@ async fn handle_get(
         segment.get_chunks()
     };
 
-    let chunks = stream::iter(
-        chunks
-            .into_iter()
-            .map(Ok::<Bytes, BroadcastStreamRecvError>),
-    );
+    let chunks = stream::iter(chunks.into_iter().map(Ok));
 
     let body_stream = match rx {
         Some(rx) => {
