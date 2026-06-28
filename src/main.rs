@@ -57,21 +57,6 @@ impl Segment {
     }
 }
 
-// TODO: Drop this
-struct SegmentGuard {
-    segment: Arc<RwLock<Segment>>,
-}
-
-impl SegmentGuard {
-    pub fn new(segment: Arc<RwLock<Segment>>) -> Self {
-        Self { segment }
-    }
-}
-
-impl Drop for SegmentGuard {
-    fn drop(&mut self) {}
-}
-
 async fn handle_put(
     Path(path): Path<String>,
     State(state): State<Arc<AppState>>,
@@ -89,19 +74,21 @@ async fn handle_put(
         segment
     };
 
-    let _segment_guard = SegmentGuard::new(Arc::clone(&segment));
-
     let mut body = body.into_body().into_data_stream();
-    while let Some(chunk) = body.next().await {
-        let chunk: axum::body::Bytes = match chunk {
-            Ok(chunk) => chunk,
-            Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()),
-        };
 
-        segment.write().await.add_chunk(chunk);
-    }
+    let response = loop {
+        match body.next().await {
+            Some(Ok(chunk)) => {
+                segment.write().await.add_chunk(chunk);
+            }
+            Some(Err(error)) => break (StatusCode::BAD_REQUEST, error.to_string()),
+            None => break (StatusCode::OK, "ok".into()),
+        }
+    };
 
-    (StatusCode::OK, "ok".into())
+    segment.write().await.close();
+
+    response
 }
 
 async fn handle_get(
