@@ -7,10 +7,13 @@ use axum::{
     routing::{delete, get, put},
 };
 use futures_util::stream;
-use std::{collections::HashMap, env, sync::Arc, sync::RwLock};
+use std::{collections::HashMap, env, sync::Arc};
 use tokio::{
     net::TcpListener,
-    sync::broadcast::{self, Receiver, Sender},
+    sync::{
+        RwLock,
+        broadcast::{self, Receiver, Sender},
+    },
 };
 use tokio_stream::{
     StreamExt,
@@ -54,6 +57,7 @@ impl Segment {
     }
 }
 
+// TODO: Drop this
 struct SegmentGuard {
     segment: Arc<RwLock<Segment>>,
 }
@@ -65,11 +69,7 @@ impl SegmentGuard {
 }
 
 impl Drop for SegmentGuard {
-    fn drop(&mut self) {
-        if let Ok(mut segment) = self.segment.write() {
-            segment.close();
-        }
-    }
+    fn drop(&mut self) {}
 }
 
 async fn handle_put(
@@ -80,15 +80,7 @@ async fn handle_put(
     println!("PUT: {}", path);
 
     let segment = {
-        let mut segments = match state.segments.write() {
-            Ok(segments) => segments,
-            Err(_) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal error".to_string(),
-                );
-            }
-        };
+        let mut segments = state.segments.write().await;
 
         let segment = Arc::new(RwLock::new(Segment::new()));
 
@@ -106,17 +98,7 @@ async fn handle_put(
             Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()),
         };
 
-        match segment.write() {
-            Ok(mut segment) => {
-                segment.add_chunk(chunk);
-            }
-            Err(_) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal error".to_string(),
-                );
-            }
-        };
+        segment.write().await.add_chunk(chunk);
     }
 
     (StatusCode::OK, "ok".into())
@@ -129,16 +111,7 @@ async fn handle_get(
     println!("GET: {}", path);
 
     let segment = {
-        let segments = match state.segments.read() {
-            Ok(segments) => segments,
-            Err(_) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal error".to_string(),
-                )
-                    .into_response();
-            }
-        };
+        let segments = state.segments.read().await;
 
         match segments.get(&path) {
             Some(segment) => Arc::clone(segment),
@@ -147,16 +120,7 @@ async fn handle_get(
     };
 
     let (chunks, rx) = {
-        let segment = match segment.read() {
-            Ok(segment) => segment,
-            Err(_) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal error".to_string(),
-                )
-                    .into_response();
-            }
-        };
+        let segment = segment.read().await;
 
         segment.get_chunks()
     };
