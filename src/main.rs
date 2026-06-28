@@ -22,14 +22,9 @@ struct AppState {
     segments: RwLock<HashMap<String, Arc<RwLock<Segment>>>>,
 }
 
-#[derive(Clone)]
-struct Chunk {
-    data: Vec<u8>,
-}
-
 struct Segment {
-    tx: Option<Sender<Chunk>>,
-    chunks: Vec<Chunk>,
+    tx: Option<Sender<Bytes>>,
+    chunks: Vec<Bytes>,
 }
 
 impl Segment {
@@ -40,10 +35,9 @@ impl Segment {
             tx: Some(tx),
             chunks: Vec::new(),
         }
-
     }
 
-    pub fn add_chunk(&mut self, chunk: Chunk) {
+    pub fn add_chunk(&mut self, chunk: Bytes) {
         if let Some(tx) = &self.tx {
             tx.send(chunk.clone()).ok();
 
@@ -51,7 +45,7 @@ impl Segment {
         }
     }
 
-    pub fn get_chunks(&self) -> (Vec<Chunk>, Option<Receiver<Chunk>>) {
+    pub fn get_chunks(&self) -> (Vec<Bytes>, Option<Receiver<Bytes>>) {
         (self.chunks.clone(), self.tx.as_ref().map(|r| r.subscribe()))
     }
 
@@ -112,8 +106,6 @@ async fn handle_put(
             Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()),
         };
 
-        let chunk = Chunk { data: chunk.into() };
-
         match segment.write() {
             Ok(mut segment) => {
                 segment.add_chunk(chunk);
@@ -172,24 +164,19 @@ async fn handle_get(
     let chunks = stream::iter(
         chunks
             .into_iter()
-            .map(|chunk| Ok::<Bytes, BroadcastStreamRecvError>(Bytes::from(chunk.data))),
+            .map(Ok::<Bytes, BroadcastStreamRecvError>),
     );
 
     let body_stream = match rx {
         Some(rx) => {
-            let chunked_stream =
-                BroadcastStream::new(rx).map(|res| res.map(|chunk| Bytes::from(chunk.data)));
+            let chunked_stream = BroadcastStream::new(rx);
 
             Body::from_stream(chunks.chain(chunked_stream))
         }
         None => Body::from_stream(chunks),
     };
 
-    (
-        StatusCode::OK,
-        body_stream,
-    )
-        .into_response()
+    (StatusCode::OK, body_stream).into_response()
 }
 
 async fn handle_delete(Path(path): Path<String>, State(_state): State<Arc<AppState>>) -> String {
