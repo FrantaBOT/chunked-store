@@ -29,21 +29,18 @@ struct Chunk {
 
 struct Segment {
     tx: Option<Sender<Chunk>>,
-    rx: Receiver<Chunk>,
-
     chunks: Vec<Chunk>,
 }
 
 impl Segment {
     pub fn new() -> Self {
-        let (tx, rx) = broadcast::channel(1024);
+        let (tx, _) = broadcast::channel(1024);
 
         Self {
             tx: Some(tx),
-            rx,
-
             chunks: Vec::new(),
         }
+
     }
 
     pub fn add_chunk(&mut self, chunk: Chunk) {
@@ -54,12 +51,8 @@ impl Segment {
         }
     }
 
-    pub fn get_receiver(&self) -> Receiver<Chunk> {
-        self.rx.resubscribe()
-    }
-
-    pub fn get_chunks(&self) -> Vec<Chunk> {
-        self.chunks.clone()
+    pub fn get_chunks(&self) -> (Vec<Chunk>, Option<Receiver<Chunk>>) {
+        (self.chunks.clone(), self.tx.as_ref().map(|r| r.subscribe()))
     }
 
     pub fn close(&mut self) {
@@ -173,7 +166,7 @@ async fn handle_get(
             }
         };
 
-        (segment.get_chunks(), segment.get_receiver())
+        segment.get_chunks()
     };
 
     let chunks = stream::iter(
@@ -182,12 +175,19 @@ async fn handle_get(
             .map(|chunk| Ok::<Bytes, BroadcastStreamRecvError>(Bytes::from(chunk.data))),
     );
 
-    let chunked_stream =
-        BroadcastStream::new(rx).map(|res| res.map(|chunk| Bytes::from(chunk.data)));
+    let body_stream = match rx {
+        Some(rx) => {
+            let chunked_stream =
+                BroadcastStream::new(rx).map(|res| res.map(|chunk| Bytes::from(chunk.data)));
+
+            Body::from_stream(chunks.chain(chunked_stream))
+        }
+        None => Body::from_stream(chunks),
+    };
 
     (
         StatusCode::OK,
-        Body::from_stream(chunks.chain(chunked_stream)),
+        body_stream,
     )
         .into_response()
 }
