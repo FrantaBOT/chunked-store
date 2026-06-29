@@ -157,7 +157,7 @@ async fn handle_delete(Path(path): Path<String>, State(_state): State<Arc<AppSta
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let address = env::var("ADDRESS").unwrap_or("127.0.0.1:8080".into());
 
     let state = Arc::new(AppState::default());
@@ -169,8 +169,10 @@ async fn main() {
         .with_state(state)
         .layer(CorsLayer::new().allow_origin(Any));
 
-    let listener = TcpListener::bind(address).await.unwrap();
+    let listener = TcpListener::bind(address).await?;
 
     println!("listening on {}", listener.local_addr().unwrap());
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, app).await?;
+
+    Ok(())
 }
