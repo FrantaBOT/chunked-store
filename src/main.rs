@@ -25,6 +25,14 @@ struct AppState {
     segments: DashMap<String, Arc<Segment>>,
 }
 
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            segments: DashMap::new(),
+        }
+    }
+}
+
 struct Chunk {
     data: Bytes,
     next: Arc<ArcSwapOption<Chunk>>,
@@ -152,9 +160,7 @@ async fn handle_delete(Path(path): Path<String>, State(_state): State<Arc<AppSta
 async fn main() {
     let address = env::var("ADDRESS").unwrap_or("127.0.0.1:8080".into());
 
-    let state = Arc::new(AppState {
-        segments: DashMap::new(),
-    });
+    let state = Arc::new(AppState::default());
 
     let app = Router::new()
         .route("/{*path}", put(handle_put))
