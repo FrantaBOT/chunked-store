@@ -1,3 +1,5 @@
+use arc_swap::ArcSwapOption;
+use async_stream::try_stream;
 use axum::{
     Router,
     body::{Body, Bytes},
@@ -7,51 +9,98 @@ use axum::{
     routing::{delete, get, put},
 };
 use dashmap::DashMap;
-use futures_util::stream;
-use std::{env, sync::Arc};
-use tokio::{
-    net::TcpListener,
+use futures_util::Stream;
+use std::{
+    env,
     sync::{
-        RwLock,
-        broadcast::{self, Receiver, Sender},
+        Arc,
+        atomic::{AtomicBool, Ordering},
     },
 };
-use tokio_stream::{StreamExt, wrappers::BroadcastStream};
+use tokio::{net::TcpListener, sync::Notify};
+use tokio_stream::StreamExt;
 use tower_http::cors::{Any, CorsLayer};
 
 struct AppState {
-    segments: DashMap<String, Arc<RwLock<Segment>>>,
+    segments: DashMap<String, Arc<Segment>>,
+}
+
+struct Chunk {
+    data: Bytes,
+    next: Arc<ArcSwapOption<Chunk>>,
 }
 
 struct Segment {
-    tx: Option<Sender<Bytes>>,
-    chunks: Vec<Bytes>,
+    start_chunk: Arc<ArcSwapOption<Chunk>>,
+    current_chunk: Arc<ArcSwapOption<Chunk>>,
+    notify: Arc<Notify>,
+    closed: AtomicBool,
 }
 
 impl Segment {
     pub fn new() -> Self {
-        let (tx, _) = broadcast::channel(1024);
-
         Self {
-            tx: Some(tx),
-            chunks: Vec::new(),
+            start_chunk: Arc::new(ArcSwapOption::new(None)),
+            current_chunk: Arc::new(ArcSwapOption::new(None)),
+            notify: Arc::new(Notify::new()),
+            closed: AtomicBool::new(false),
         }
     }
 
-    pub fn add_chunk(&mut self, chunk: Bytes) {
-        if let Some(tx) = &self.tx {
-            tx.send(chunk.clone()).ok();
+    pub fn add_chunk(&self, data: Bytes) {
+        let chunk = Arc::new(Chunk {
+            data,
+            next: Arc::new(ArcSwapOption::new(None)),
+        });
 
-            self.chunks.push(chunk);
+        match self.current_chunk.load_full() {
+            Some(last) => {
+                last.next.store(Some(Arc::clone(&chunk)));
+                self.current_chunk.store(Some(Arc::clone(&chunk)));
+            }
+            None => {
+                self.start_chunk.store(Some(Arc::clone(&chunk)));
+                self.current_chunk.store(Some(Arc::clone(&chunk)));
+            }
+        }
+
+        self.notify.notify_waiters();
+    }
+
+    pub fn stream(self: Arc<Self>) -> impl Stream<Item = Result<Bytes, std::io::Error>> {
+        try_stream! {
+            let mut current_chunk = Arc::clone(&self.start_chunk);
+
+            loop {
+                let closed = self.closed.load(Ordering::Acquire);
+
+                if let Some(chunk) = current_chunk.load_full() {
+                    current_chunk = Arc::clone(&chunk.next);
+
+                    yield chunk.data.clone();
+                    continue
+                }
+
+                if closed {
+                    break
+                }
+
+                self.notify.notified().await;
+            }
         }
     }
 
-    pub fn get_chunks(&self) -> (Vec<Bytes>, Option<Receiver<Bytes>>) {
-        (self.chunks.clone(), self.tx.as_ref().map(|r| r.subscribe()))
+    pub fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        self.notify.notify_waiters();
     }
+}
 
-    pub fn close(&mut self) {
-        self.tx.take();
+struct SegmentGuard(Arc<Segment>);
+
+impl Drop for SegmentGuard {
+    fn drop(&mut self) {
+        self.0.close();
     }
 }
 
@@ -62,29 +111,20 @@ async fn handle_put(
 ) -> impl IntoResponse {
     println!("PUT: {}", path);
 
-    let segment = {
-        let segment = Arc::new(RwLock::new(Segment::new()));
+    let segment = Arc::new(Segment::new());
+    let _segment_guard = SegmentGuard(Arc::clone(&segment));
 
-        state.segments.insert(path.clone(), Arc::clone(&segment));
-
-        segment
-    };
+    state.segments.insert(path.clone(), Arc::clone(&segment));
 
     let mut body = body.into_body().into_data_stream();
 
-    let response = loop {
+    loop {
         match body.next().await {
-            Some(Ok(chunk)) => {
-                segment.write().await.add_chunk(chunk);
-            }
-            Some(Err(error)) => break (StatusCode::BAD_REQUEST, error.to_string()),
-            None => break (StatusCode::OK, "ok".into()),
+            Some(Ok(chunk)) => segment.add_chunk(chunk),
+            Some(Err(error)) => return (StatusCode::BAD_REQUEST, error.to_string()),
+            None => return (StatusCode::OK, "ok".into()),
         }
-    };
-
-    segment.write().await.close();
-
-    response
+    }
 }
 
 async fn handle_get(
@@ -100,24 +140,7 @@ async fn handle_get(
         }
     };
 
-    let (chunks, rx) = {
-        let segment = segment.read().await;
-
-        segment.get_chunks()
-    };
-
-    let chunks = stream::iter(chunks.into_iter().map(Ok));
-
-    let body_stream = match rx {
-        Some(rx) => {
-            let chunked_stream = BroadcastStream::new(rx);
-
-            Body::from_stream(chunks.chain(chunked_stream))
-        }
-        None => Body::from_stream(chunks),
-    };
-
-    (StatusCode::OK, body_stream).into_response()
+    Body::from_stream(segment.stream()).into_response()
 }
 
 async fn handle_delete(Path(path): Path<String>, State(_state): State<Arc<AppState>>) -> String {

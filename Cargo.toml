@@ -10,3 +10,5 @@ tower-http = { version = "0.7.0", features = ["cors"] }
 tokio = { version = "1.52.3", features = ["full"] }
 tokio-stream = { version = "0.1.18", features = ["full"] }
 futures-util = "0.3.32"
+arc-swap = "1.9.1"
+async-stream = "0.3.6"
