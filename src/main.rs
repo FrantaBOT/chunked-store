@@ -153,9 +153,13 @@ async fn handle_get(
     Body::from_stream(segment.stream()).into_response()
 }
 
-async fn handle_delete(Path(path): Path<String>, State(_state): State<Arc<AppState>>) -> String {
+async fn handle_delete(Path(path): Path<String>, State(state): State<Arc<AppState>>) -> impl IntoResponse {
     println!("DELETE: {}", path);
-    format!("DELETE: {}", path)
+
+    match state.segments.remove(&path) {
+        Some(_) => (StatusCode::OK, "ok".to_string()),
+        None => (StatusCode::NOT_FOUND, "not found".into())
+    }
 }
 
 #[tokio::main]
