@@ -10,6 +10,8 @@ use axum::{
 };
 use dashmap::DashMap;
 use futures_util::Stream;
+use hyper::server::conn::http1;
+use hyper_util::{rt::TokioIo, service::TowerToHyperService};
 use std::{
     env,
     sync::{
@@ -172,7 +174,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(address).await?;
 
     println!("listening on {}", listener.local_addr().unwrap());
-    axum::serve(listener, app).await?;
+    
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let app = app.clone();
 
-    Ok(())
+        tokio::spawn(async move {
+            let io = TokioIo::new(stream);
+
+            let mut builder = http1::Builder::new();
+            builder.half_close(true);
+
+            let service = TowerToHyperService::new(app);
+
+            if let Err(err) = builder.serve_connection(io, service).await {
+                eprintln!("failed to serve connection: {err:#}");
+            }
+        });
+    }
 }

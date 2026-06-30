@@ -118,6 +118,8 @@ dependencies = [
  "axum",
  "dashmap",
  "futures-util",
+ "hyper",
+ "hyper-util",
  "tokio",
  "tokio-stream",
  "tower-http",
