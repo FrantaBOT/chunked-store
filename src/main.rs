@@ -88,6 +88,7 @@ impl Segment {
             let mut current_chunk = Arc::clone(&self.start_chunk);
 
             loop {
+                let notified = self.notify.notified();
                 let closed = self.closed.load(Ordering::Acquire);
 
                 if let Some(chunk) = current_chunk.load_full() {
@@ -101,7 +102,7 @@ impl Segment {
                     break
                 }
 
-                self.notify.notified().await;
+                notified.await;
             }
         }
     }
