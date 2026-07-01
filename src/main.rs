@@ -3,34 +3,40 @@ use async_stream::try_stream;
 use axum::{
     Router,
     body::{Body, Bytes},
-    extract::{Path, Request, State},
+    extract::{Path, Query, Request, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{delete, get, put},
+    routing::{any, delete, get, put},
 };
 use dashmap::DashMap;
 use futures_util::Stream;
 use hyper::server::conn::http1;
 use hyper_util::{rt::TokioIo, service::TowerToHyperService};
 use std::{
+    collections::BTreeSet,
     env,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
 };
-use tokio::{net::TcpListener, sync::Notify};
+use tokio::{
+    net::TcpListener,
+    sync::{Notify, RwLock},
+};
 use tokio_stream::StreamExt;
 use tower_http::cors::{Any, CorsLayer};
 
 struct AppState {
     segments: DashMap<String, Arc<Segment>>,
+    segments_list: Arc<RwLock<BTreeSet<String>>>,
 }
 
 impl Default for AppState {
     fn default() -> Self {
         Self {
             segments: DashMap::new(),
+            segments_list: Arc::new(RwLock::new(BTreeSet::new())),
         }
     }
 }
@@ -125,6 +131,7 @@ async fn handle_put(
     let _segment_guard = SegmentGuard(Arc::clone(&segment));
 
     state.segments.insert(path.clone(), Arc::clone(&segment));
+    state.segments_list.write().await.insert(path.clone());
 
     let mut body = body.into_body().into_data_stream();
 
@@ -153,13 +160,69 @@ async fn handle_get(
     Body::from_stream(segment.stream()).into_response()
 }
 
-async fn handle_delete(Path(path): Path<String>, State(state): State<Arc<AppState>>) -> impl IntoResponse {
+async fn handle_delete(
+    Path(path): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
     println!("DELETE: {}", path);
 
     match state.segments.remove(&path) {
-        Some(_) => (StatusCode::OK, "ok".to_string()),
-        None => (StatusCode::NOT_FOUND, "not found".into())
+        Some(_) => {
+            state.segments_list.write().await.remove(&path);
+
+            (StatusCode::OK, "ok".to_string())
+        }
+        None => (StatusCode::NOT_FOUND, "not found".into()),
     }
+}
+
+async fn handle_any(
+    state: State<Arc<AppState>>,
+    params: Query<ListParams>,
+    req: Request<Body>,
+) -> impl IntoResponse {
+    println!("ANY");
+
+    let method = req.method();
+
+    match method.as_str() {
+        "LIST" => handle_list(req, params, state).await.into_response(),
+        _ => StatusCode::METHOD_NOT_ALLOWED.into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct ListParams {
+    limit: Option<usize>,
+    offset: Option<usize>,
+}
+
+async fn handle_list(
+    req: Request<Body>,
+    Query(params): Query<ListParams>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    println!("LIST {}", req.uri());
+
+    let path = req
+        .uri()
+        .path()
+        .trim_start_matches("/")
+        .trim_end_matches('*');
+    let offset = params.offset.unwrap_or(0);
+    let limit = params.limit.unwrap_or(10000).min(100000);
+
+    let results: Vec<String> = state
+        .segments_list
+        .read()
+        .await
+        .range(path.to_string()..=format!("{}~", path))
+        .skip(offset)
+        .take(limit)
+        .cloned()
+        .collect();
+
+    (StatusCode::OK, results.join("\n"))
 }
 
 #[tokio::main]
@@ -172,13 +235,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/{*path}", put(handle_put))
         .route("/{*path}", get(handle_get))
         .route("/{*path}", delete(handle_delete))
+        .route("/{*path}", any(handle_any))
         .with_state(state)
         .layer(CorsLayer::new().allow_origin(Any));
 
     let listener = TcpListener::bind(address).await?;
 
     println!("listening on {}", listener.local_addr().unwrap());
-    
+
     loop {
         let (stream, _) = listener.accept().await?;
         let app = app.clone();
