@@ -6,9 +6,11 @@ use axum::{
     Router,
     routing::{any, delete, get, put},
 };
+use axum_metrics::MetricLayer;
 use hyper::server::conn::http1;
 use hyper_util::{rt::TokioIo, service::TowerToHyperService};
-use std::{env, sync::Arc};
+use metrics_exporter_prometheus::PrometheusBuilder;
+use std::{env, net::SocketAddr, sync::Arc};
 use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{debug, info};
@@ -24,6 +26,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("application starting");
 
+    let metrics_address = env::var("METRICS_ADDRESS")
+        .ok()
+        .and_then(|s| s.parse::<SocketAddr>().ok())
+        .unwrap_or("127.0.0.1:9000".parse().unwrap());
+
+    PrometheusBuilder::new()
+        .with_http_listener(metrics_address)
+        .install()
+        .unwrap();
+
+    info!("metrics listening on {}", metrics_address.to_string());
+
     let address = env::var("ADDRESS").unwrap_or("127.0.0.1:8080".into());
 
     let state = Arc::new(AppState::default());
@@ -34,11 +48,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/{*path}", delete(handlers::handle_delete))
         .route("/{*path}", any(handlers::handle_any))
         .with_state(state)
-        .layer(CorsLayer::new().allow_origin(Any));
+        .layer(CorsLayer::new().allow_origin(Any))
+        .layer(MetricLayer::default());
 
     let listener = TcpListener::bind(address).await?;
 
-    info!("listening on {}", listener.local_addr().unwrap());
+    info!("app listening on {}", listener.local_addr().unwrap());
 
     loop {
         let (stream, _) = listener.accept().await?;

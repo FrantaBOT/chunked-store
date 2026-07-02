@@ -10,6 +10,8 @@ dashmap = "6.2.1"
 hyper = "1.10.1"
 hyper-util = "0.1.20"
 axum = "0.8.9"
+axum-metrics = "0.2"
+metrics-exporter-prometheus = "0.16"
 tower-http = { version = "0.7.0", features = ["cors"] }
 tokio = { version = "1.52.3", features = ["full"] }
 tokio-stream = { version = "0.1.18", features = ["full"] }
