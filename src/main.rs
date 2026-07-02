@@ -11,11 +11,19 @@ use hyper_util::{rt::TokioIo, service::TowerToHyperService};
 use std::{env, sync::Arc};
 use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
+use tracing::{debug, info};
+use tracing_subscriber::EnvFilter;
 
 use app_state::AppState;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse()?))
+        .init();
+
+    info!("application starting");
+
     let address = env::var("ADDRESS").unwrap_or("127.0.0.1:8080".into());
 
     let state = Arc::new(AppState::default());
@@ -30,7 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let listener = TcpListener::bind(address).await?;
 
-    println!("listening on {}", listener.local_addr().unwrap());
+    info!("listening on {}", listener.local_addr().unwrap());
 
     loop {
         let (stream, _) = listener.accept().await?;
@@ -45,7 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let service = TowerToHyperService::new(app);
 
             if let Err(err) = builder.serve_connection(io, service).await {
-                eprintln!("failed to serve connection: {err:#}");
+                debug!("failed to serve connection: {err:#}");
             }
         });
     }

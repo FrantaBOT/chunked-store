@@ -7,6 +7,8 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use tokio::sync::Notify;
+use tracing::{debug, instrument};
+
 struct Chunk {
     data: Bytes,
     next: Arc<ArcSwapOption<Chunk>>,
@@ -29,7 +31,10 @@ impl Segment {
         }
     }
 
+    #[instrument(skip_all, fields(data_len = data.len()))]
     pub fn add_chunk(&self, data: Bytes) {
+        debug!("adding chunk to segment");
+
         let chunk = Arc::new(Chunk {
             data,
             next: Arc::new(ArcSwapOption::new(None)),
@@ -39,19 +44,23 @@ impl Segment {
             Some(last) => {
                 last.next.store(Some(Arc::clone(&chunk)));
                 self.current_chunk.store(Some(Arc::clone(&chunk)));
+                debug!("appended chunk to existing chain");
             }
             None => {
                 self.start_chunk.store(Some(Arc::clone(&chunk)));
                 self.current_chunk.store(Some(Arc::clone(&chunk)));
+                debug!("created first chunk in segment");
             }
         }
 
         self.notify.notify_waiters();
     }
 
+    #[instrument(skip_all)]
     pub fn stream(self: Arc<Self>) -> impl Stream<Item = Result<Bytes, std::io::Error>> {
         try_stream! {
             let mut current_chunk = Arc::clone(&self.start_chunk);
+            let mut chunk_count = 0usize;
 
             loop {
                 let notified = self.notify.notified();
@@ -59,23 +68,28 @@ impl Segment {
 
                 if let Some(chunk) = current_chunk.load_full() {
                     current_chunk = Arc::clone(&chunk.next);
+                    chunk_count += 1;
 
                     yield chunk.data.clone();
                     continue
                 }
 
                 if closed {
+                    debug!(chunk_count, "segment stream ended");
                     break
                 }
 
+                debug!("waiting for more chunks");
                 notified.await;
             }
         }
     }
 
+    #[instrument(skip_all)]
     pub fn close(&self) {
         self.closed.store(true, Ordering::Release);
         self.notify.notify_waiters();
+        debug!("segment closed");
     }
 }
 

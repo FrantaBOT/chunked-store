@@ -6,18 +6,20 @@ use axum::{
 };
 use std::sync::Arc;
 use tokio_stream::StreamExt;
+use tracing::{debug, error, info, instrument};
 
 use crate::{
     app_state::AppState,
     segment::{Segment, SegmentGuard},
 };
 
+#[instrument(skip_all, fields(path = %path))]
 pub async fn handle_put(
     Path(path): Path<String>,
     State(state): State<Arc<AppState>>,
     body: Request,
 ) -> impl IntoResponse {
-    println!("PUT: {}", path);
+    info!("PUT request received");
 
     let segment = Arc::new(Segment::new());
     let _segment_guard = SegmentGuard(Arc::clone(&segment));
@@ -25,61 +27,83 @@ pub async fn handle_put(
     state.segments.insert(path.clone(), Arc::clone(&segment));
     state.segments_list.write().await.insert(path.clone());
 
+    info!("segment created and registered");
+
     let mut body = body.into_body().into_data_stream();
 
     loop {
         match body.next().await {
             Some(Ok(chunk)) => segment.add_chunk(chunk),
-            Some(Err(error)) => return (StatusCode::BAD_REQUEST, error.to_string()),
-            None => return (StatusCode::OK, "ok".into()),
+            Some(Err(error)) => {
+                error!("error reading request body: {}", error);
+                return (StatusCode::BAD_REQUEST, error.to_string());
+            }
+            None => {
+                info!("request body fully received");
+                return (StatusCode::OK, "ok".into());
+            }
         }
     }
 }
 
+#[instrument(skip_all, fields(path = %path))]
 pub async fn handle_get(
     Path(path): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    println!("GET: {}", path);
+    info!("GET request received");
 
     let segment = {
         match state.segments.get(&path) {
-            Some(segment) => Arc::clone(&segment),
-            None => return (StatusCode::NOT_FOUND, "not found".to_string()).into_response(),
+            Some(segment) => {
+                debug!("segment found");
+                Arc::clone(&segment)
+            }
+            None => {
+                debug!("segment not found");
+                return (StatusCode::NOT_FOUND, "not found".to_string()).into_response();
+            }
         }
     };
 
     Body::from_stream(segment.stream()).into_response()
 }
 
+#[instrument(skip_all, fields(path = %path))]
 pub async fn handle_delete(
     Path(path): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    println!("DELETE: {}", path);
+    info!("DELETE request received");
 
     match state.segments.remove(&path) {
         Some(_) => {
             state.segments_list.write().await.remove(&path);
-
+            info!("segment deleted");
             (StatusCode::OK, "ok".to_string())
         }
-        None => (StatusCode::NOT_FOUND, "not found".into()),
+        None => {
+            debug!("segment not found for deletion");
+            (StatusCode::NOT_FOUND, "not found".into())
+        }
     }
 }
 
+#[instrument(skip_all)]
 pub async fn handle_any(
     state: State<Arc<AppState>>,
     params: Query<ListParams>,
     req: Request<Body>,
 ) -> impl IntoResponse {
-    println!("ANY");
+    info!("ANY request received");
 
-    let method = req.method();
-
+    let method = req.method().to_string();
     match method.as_str() {
         "LIST" => handle_list(req, params, state).await.into_response(),
-        _ => StatusCode::METHOD_NOT_ALLOWED.into_response(),
+        _ => {
+            debug!(method, "unsupported method");
+            StatusCode::METHOD_NOT_ALLOWED.into_response()
+        }
     }
 }
 
@@ -89,12 +113,17 @@ pub struct ListParams {
     offset: Option<usize>,
 }
 
+#[instrument(skip_all, fields(
+    path = %req.uri().path(),
+    limit = params.limit,
+    offset = params.offset
+))]
 async fn handle_list(
     req: Request<Body>,
     Query(params): Query<ListParams>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    println!("LIST {}", req.uri());
+    info!("ANY request received");
 
     let path = req
         .uri()
@@ -108,11 +137,13 @@ async fn handle_list(
         .segments_list
         .read()
         .await
-        .range(path.to_string()..=format!("{}~", path))
+        .range(path.to_string()..=format!("{path}~"))
         .skip(offset)
         .take(limit)
         .cloned()
         .collect();
+
+    debug!(result_count = results.len(), "list results collected");
 
     (StatusCode::OK, results.join("\n"))
 }
