@@ -86,3 +86,135 @@ impl Drop for SegmentGuard {
         self.0.close();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio_stream::StreamExt;
+
+    #[tokio::test]
+    async fn test_segment_single_chunk() {
+        let segment = Arc::new(Segment::new());
+        segment.add_chunk(Bytes::from("chunk"));
+
+        let stream = segment.clone().stream();
+        tokio::pin!(stream);
+
+        assert_eq!(stream.next().await.unwrap().unwrap(), Bytes::from("chunk"));
+    }
+
+    #[tokio::test]
+    async fn test_segment_multiple_chunks() {
+        let segment = Arc::new(Segment::new());
+        segment.add_chunk(Bytes::from("first chunk"));
+        segment.add_chunk(Bytes::from("second chunk"));
+
+        let stream = segment.clone().stream();
+        tokio::pin!(stream);
+
+        assert_eq!(
+            stream.next().await.unwrap().unwrap(),
+            Bytes::from("first chunk")
+        );
+        assert_eq!(
+            stream.next().await.unwrap().unwrap(),
+            Bytes::from("second chunk")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_segment_closed_stops_stream() {
+        let segment = Arc::new(Segment::new());
+        segment.add_chunk(Bytes::from("chunk"));
+        segment.close();
+
+        let stream = segment.clone().stream();
+        tokio::pin!(stream);
+
+        assert_eq!(stream.next().await.unwrap().unwrap(), Bytes::from("chunk"));
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_segment_concurrent_readers() {
+        let segment = Arc::new(Segment::new());
+        segment.add_chunk(Bytes::from("first chunk"));
+        segment.add_chunk(Bytes::from("second chunk"));
+        segment.close();
+
+        let segment_reader_1 = Arc::clone(&segment);
+        let segment_reader_2 = Arc::clone(&segment);
+
+        let segment_reader_task_1 = tokio::spawn(async move {
+            let stream = segment_reader_1.stream();
+            tokio::pin!(stream);
+
+            let mut results = Vec::new();
+            while let Some(Ok(chunk)) = stream.next().await {
+                results.push(chunk);
+            }
+            results
+        });
+
+        let segment_reader_task_2 = tokio::spawn(async move {
+            let stream = segment_reader_2.stream();
+            tokio::pin!(stream);
+
+            let mut results = Vec::new();
+            while let Some(Ok(chunk)) = stream.next().await {
+                results.push(chunk);
+            }
+            results
+        });
+
+        assert_eq!(segment_reader_task_1.await.unwrap().len(), 2);
+        assert_eq!(segment_reader_task_2.await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_segment_streaming() {
+        let segment = Arc::new(Segment::new());
+        let segment_clone = Arc::clone(&segment);
+
+        let add_task = tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            segment_clone.add_chunk(Bytes::from("chunk"));
+        });
+
+        let stream = segment.clone().stream();
+        tokio::pin!(stream);
+
+        assert_eq!(stream.next().await.unwrap().unwrap(), Bytes::from("chunk"));
+
+        add_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_segment_guard_closes_on_drop() {
+        let segment = Arc::new(Segment::new());
+        let segment_clone = Arc::clone(&segment);
+
+        segment.add_chunk(Bytes::from("test"));
+
+        {
+            let _segment_guard = SegmentGuard(Arc::clone(&segment_clone));
+        }
+
+        assert!(segment_clone.closed.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn test_segment_large_data() {
+        let segment = Arc::new(Segment::new());
+        let large_data = Bytes::from(vec![0u8; 1024 * 1024]);
+
+        segment.add_chunk(large_data.clone());
+
+        let stream = segment.clone().stream();
+        tokio::pin!(stream);
+
+        let chunk = stream.next().await.unwrap().unwrap();
+
+        assert_eq!(chunk.len(), 1024 * 1024);
+    }
+}

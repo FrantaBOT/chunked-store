@@ -17,3 +17,16 @@ impl Default for AppState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_app_state_default() {
+        let state = AppState::default();
+
+        assert_eq!(state.segments.len(), 0);
+        assert_eq!(state.segments_list.read().await.len(), 0);
+    }
+}
