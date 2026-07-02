@@ -24,8 +24,7 @@ pub async fn handle_put(
     let segment = Arc::new(Segment::new());
     let _segment_guard = SegmentGuard(Arc::clone(&segment));
 
-    state.segments.insert(path.clone(), Arc::clone(&segment));
-    state.segments_list.write().await.insert(path.clone());
+    state.segments.write().await.insert(path.clone(), Arc::clone(&segment));
 
     info!("segment created and registered");
 
@@ -54,7 +53,7 @@ pub async fn handle_get(
     info!("GET request received");
 
     let segment = {
-        match state.segments.get(&path) {
+        match state.segments.read().await.get(&path) {
             Some(segment) => {
                 debug!("segment found");
                 Arc::clone(&segment)
@@ -76,9 +75,8 @@ pub async fn handle_delete(
 ) -> impl IntoResponse {
     info!("DELETE request received");
 
-    match state.segments.remove(&path) {
+    match state.segments.write().await.remove(&path) {
         Some(_) => {
-            state.segments_list.write().await.remove(&path);
             info!("segment deleted");
             (StatusCode::OK, "ok".to_string())
         }
@@ -133,14 +131,14 @@ async fn handle_list(
     let offset = params.offset.unwrap_or(0);
     let limit = params.limit.unwrap_or(10000).min(100000);
 
-    let results: Vec<String> = state
-        .segments_list
+    let results: Vec<_> = state
+        .segments
         .read()
         .await
         .range(path.to_string()..=format!("{path}~"))
         .skip(offset)
         .take(limit)
-        .cloned()
+        .map(|(k, _)| k.to_string())
         .collect();
 
     debug!(result_count = results.len(), "list results collected");
@@ -175,10 +173,7 @@ mod tests {
         let status = response.status();
         assert_eq!(status, StatusCode::OK);
 
-        assert!(state.segments.contains_key(&path));
-
-        let list = state.segments_list.read().await;
-        assert!(list.contains(&path));
+        assert!(state.segments.read().await.contains_key(&path));
     }
 
     #[tokio::test]
@@ -188,7 +183,7 @@ mod tests {
 
         let segment = Arc::new(Segment::new());
         segment.add_chunk(Bytes::from("chunk"));
-        state.segments.insert(path.clone(), segment);
+        state.segments.write().await.insert(path.clone(), segment);
 
         let response = handle_get(Path(path.clone()), State(state.clone()))
             .await
@@ -213,8 +208,7 @@ mod tests {
         let path = "test".to_string();
 
         let segment = Arc::new(Segment::new());
-        state.segments.insert(path.clone(), segment);
-        state.segments_list.write().await.insert(path.clone());
+        state.segments.write().await.insert(path.clone(), segment);
 
         let response = handle_delete(Path(path.clone()), State(state.clone()))
             .await
@@ -222,10 +216,7 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
 
-        assert!(!state.segments.contains_key(&path));
-
-        let list = state.segments_list.read().await;
-        assert!(!list.contains(&path));
+        assert!(!state.segments.read().await.contains_key(&path));
     }
 
     #[tokio::test]
@@ -271,8 +262,7 @@ mod tests {
             for i in 0..3 {
                 let path = format!("{}path{}", prefix, i);
                 let segment = Arc::new(Segment::new());
-                state.segments.insert(path.clone(), segment);
-                state.segments_list.write().await.insert(path);
+                state.segments.write().await.insert(path.clone(), segment);
             }
         }
 
@@ -332,8 +322,7 @@ mod tests {
         for i in 0..5 {
             let path = format!("test/{}", i);
             let segment = Arc::new(Segment::new());
-            state.segments.insert(path.clone(), segment);
-            state.segments_list.write().await.insert(path);
+            state.segments.write().await.insert(path.clone(), segment);
         }
 
         let request = Request::builder()
@@ -366,8 +355,7 @@ mod tests {
         for i in 0..10 {
             let path = format!("test/{}", i);
             let segment = Arc::new(Segment::new());
-            state.segments.insert(path.clone(), segment);
-            state.segments_list.write().await.insert(path);
+            state.segments.write().await.insert(path.clone(), segment);
         }
 
         let request = Request::builder()
